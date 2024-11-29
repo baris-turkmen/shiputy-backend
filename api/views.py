@@ -1,21 +1,61 @@
 from django.shortcuts import render
 from rest_framework import viewsets, status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q
-from .models import Profile, Match, Like
-from .serializers import ProfileSerializer, MatchSerializer, LikeSerializer
+from .models import Profile, Match, Like, UserBlock, Report
+from .serializers import ProfileSerializer, MatchSerializer, LikeSerializer, ReportSerializer
+from rest_framework import filters
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework_simplejwt.views import TokenObtainPairView
+from .serializers import CustomTokenObtainPairSerializer
 
 # Create your views here.
+
+class CustomTokenObtainPairView(TokenObtainPairView):
+    serializer_class = CustomTokenObtainPairSerializer
 
 class ProfileViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = ProfileSerializer
+    queryset = Profile.objects.all()
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    search_fields = ['user__username', 'location']
+    filterset_fields = ['gender', 'location']
     
     def get_queryset(self):
-        # Exclude the current user's profile from the list
-        return Profile.objects.exclude(user=self.request.user)
+        user = self.request.user
+        if self.action == 'retrieve':
+            return Profile.objects.all()
+            
+        # For list view
+        blocked_users = UserBlock.objects.filter(blocker=user).values_list('blocked', flat=True)
+        queryset = Profile.objects.exclude(
+            Q(user=user) | 
+            Q(user__in=blocked_users)
+        )
+        
+        # Filter based on gender preferences
+        if user.profile.preferred_gender != 'A':
+            queryset = queryset.filter(gender=user.profile.preferred_gender)
+        
+        return queryset
+    
+    @action(detail=True, methods=['post'])
+    def block(self, request, pk=None):
+        profile = self.get_object()
+        UserBlock.objects.create(blocker=request.user, blocked=profile.user)
+        return Response({'detail': 'User blocked'}, status=status.HTTP_200_OK)
+    
+    @action(detail=True, methods=['post'])
+    def report(self, request, pk=None):
+        profile = self.get_object()
+        serializer = ReportSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save(reporter=request.user, reported=profile.user)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
